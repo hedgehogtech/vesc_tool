@@ -1,3 +1,11 @@
+# HHT VESC Tool Info
+
+The messages to show the restricted and fault states in were added to the bottom left corner of the screen on the bottom bar where the faults show up. This is a fairly simple feature to add by adding a few lines of code to mainwindow.cpp and mainwindow.h to read the required values, check them against the values in the fault table and set a label to show any out of range parameters.
+
+Added the messages caused some issues as more polling was needed to read the all the relevant values and fault code which caused some issues with bus load but this issue can likely be solved by tuning the polling frequency or reading the data from different parts of the code (i.e. if realtime data is on some of the data is already being requested and sent. Because of the issues caused by the implementation of the message and the changes to enable CAN causing more issues the message was temporarily removed but can easily added back by making the few small changes mentioned above.
+
+The main issues that occured when making the changes were with enabling CAN. The VESC Tool has CAN functionality but it is disabled by default and appears the code that is there is for linux use only. There is also some parts commented out or not fully implemented. The changes made to get CAN working caused some issues with the performance of the VESC Tool and occansional crashes. Most of the issues seemed to be caused by heavy bus loads as some of data packets are sent a buffers with many messages in quick succesion. Tuning the frequency of the messages helped resolve some issues but more work is needed to get it to a state for regular use or be sent externally. 
+
 # VESC® Tool
 
 This is the source code of VESC Tool. A pre-compiled binary of both the stable release as well as the development release packaged with all the matching firmware for all supported hardware can be downloaded at http://vesc-project.com/
