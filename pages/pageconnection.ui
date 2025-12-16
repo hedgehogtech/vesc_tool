@@ -184,6 +184,9 @@
          </item>
          <item>
           <widget class="QComboBox" name="CANbusTargetIdBox">
+           <property name="editable">
+            <bool>true</bool>
+           </property>
            <property name="sizePolicy">
             <sizepolicy hsizetype="MinimumExpanding" vsizetype="Fixed">
              <horstretch>0</horstretch>
@@ -198,7 +201,7 @@
          <item>
           <widget class="QSpinBox" name="CANbusBitrateBox">
            <property name="enabled">
-            <bool>false</bool>
+            <bool>true</bool>
            </property>
            <property name="focusPolicy">
             <enum>Qt::WheelFocus</enum>
@@ -206,18 +209,18 @@
            <property name="toolTip">
             <string>This configuration is not supported by the socketcan backend. However it is possible to set the rate when configuring the CAN network interface using the ip link command.</string>
            </property>
-           <property name="suffix">
-            <string> kbit/s</string>
-           </property>
-           <property name="prefix">
-            <string>Bit rate: </string>
-           </property>
-           <property name="maximum">
-            <number>1000</number>
-           </property>
-           <property name="value">
-            <number>500</number>
-           </property>
+            <property name="suffix">
+              <string> bit/s</string>
+            </property>
+            <property name="prefix">
+              <string/>
+            </property>
+            <property name="maximum">
+              <number>2000000</number>
+            </property>
+            <property name="value">
+              <number>500000</number>
+            </property>
           </widget>
          </item>
          <item>

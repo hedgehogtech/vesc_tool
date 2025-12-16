@@ -412,6 +412,7 @@ private:
     QString mLastCanDeviceInterface;
     int mLastCanDeviceBitrate;
     QString mLastCanBackend;
+    bool mCanBusWaitForWrite;
     int mLastCanDeviceID;
     QByteArray mCanRxBuffer;
     QVector<int> mCanNodesID;

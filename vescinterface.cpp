@@ -152,6 +152,7 @@ VescInterface::VescInterface(QObject *parent) : QObject(parent)
     mLastCanDeviceInterface = mSettings.value("CANbusDeviceInterface", "can0").toString();
     mLastCanDeviceBitrate = mSettings.value("CANbusDeviceBitrate", 500000).toInt();
     mLastCanBackend = mSettings.value("CANbusBackend", "socketcan").toString();
+    mCanBusWaitForWrite = false;
     mLastCanDeviceID = mSettings.value("CANbusLastDeviceID", 0).toInt();
     mCANbusScanning = false;
 #endif
@@ -2552,6 +2553,19 @@ QList<QString> VescInterface::listCANbusInterfaces()
 {
     QList<QString> res;
 #ifdef HAS_CANBUS
+#ifdef Q_OS_WIN
+    // Query peakcan to get the actual handle (e.g. usb0) on Windows
+    if (QCanBus::instance()) {
+        QString err;
+        QList<QCanBusDeviceInfo> devs = QCanBus::instance()->availableDevices("peakcan", &err);
+        for (const auto &d : devs) {
+            res.append(d.name());
+        }
+    }
+    if (res.isEmpty()) {
+        res.append("PCAN_USBBUS1");
+    }
+#else
 #ifdef Q_OS_UNIX
     QFile devicesFile("/proc/net/dev");
 
@@ -2571,6 +2585,7 @@ QList<QString> VescInterface::listCANbusInterfaces()
     }
 #endif
 #endif
+#endif
     return res;
 }
 
@@ -2580,6 +2595,14 @@ bool VescInterface::connectCANbus(QString backend, QString ifName, int bitrate)
     QString errorString;
 
     mCANbusScanning = false;
+    if (ifName.isEmpty()) {
+#ifdef Q_OS_WIN
+        ifName = "PCAN_USBBUS1";
+#endif
+    }
+
+    // Set write wait strategy based on backend
+    mCanBusWaitForWrite = (backend == "socketcan");
     mCanDevice = QCanBus::instance()->createDevice(backend, ifName, &errorString);
     if (!mCanDevice) {
         QString msg = tr("Error creating device '%1' using backend '%2', reason: '%3'").arg(mLastCanDeviceInterface).arg(mLastCanBackend).arg(errorString);
@@ -2591,13 +2614,14 @@ bool VescInterface::connectCANbus(QString backend, QString ifName, int bitrate)
     connect(mCanDevice, SIGNAL(framesReceived()), this, SLOT(CANbusDataAvailable()));
     connect(mCanDevice, SIGNAL(errorOccurred(QCanBusDevice::CanBusError)), this, SLOT(CANbusError(QCanBusDevice::CanBusError)));
 
-    mCanDevice->setConfigurationParameter(QCanBusDevice::LoopbackKey, false);
-    mCanDevice->setConfigurationParameter(QCanBusDevice::ReceiveOwnKey, false);
-    // bitrate change not supported yet by socketcan. It is possible to set the rate when
-    // configuring the CAN network interface using the ip link command.
-    // mCanDevice->setConfigurationParameter(QCanBusDevice::BitRateKey, bitrate);
-    mCanDevice->setConfigurationParameter(QCanBusDevice::CanFdKey, false);
-    mCanDevice->setConfigurationParameter(QCanBusDevice::ReceiveOwnKey, false);
+    if (backend == "socketcan") {
+        mCanDevice->setConfigurationParameter(QCanBusDevice::LoopbackKey, false);
+        mCanDevice->setConfigurationParameter(QCanBusDevice::ReceiveOwnKey, false);
+        mCanDevice->setConfigurationParameter(QCanBusDevice::CanFdKey, false);
+    } else {
+        mCanDevice->setConfigurationParameter(QCanBusDevice::BitRateKey, bitrate);
+        mCanDevice->setConfigurationParameter(QCanBusDevice::CanFdKey, false);
+    }
 
     if (!mCanDevice->connectDevice()) {
         QString msg = tr("Connection error: %1").arg(mCanDevice->errorString());
@@ -2606,6 +2630,7 @@ bool VescInterface::connectCANbus(QString backend, QString ifName, int bitrate)
 
         delete mCanDevice;
         mCanDevice = nullptr;
+
         return false;
     }
 
@@ -2756,9 +2781,10 @@ void VescInterface::scanCANbus()
 
     QCanBusFrame frame;
     frame.setExtendedFrameFormat(true);
-    frame.setFrameType(QCanBusFrame::UnknownFrame);
+    frame.setFrameType(QCanBusFrame::DataFrame);
     frame.setFlexibleDataRateFormat(false);
     frame.setBitrateSwitch(false);
+    frame.setPayload(QByteArray(1, 0));
 
     QEventLoop loop;
     QTimer pollTimer;
@@ -3337,16 +3363,16 @@ void VescInterface::packetDataToSend(QByteArray &data)
         // Guess: Something in the CANable firmware.
         QThread::msleep(5);
 
-        QCanBusFrame frame;
-        frame.setExtendedFrameFormat(true);
-        frame.setFrameType(QCanBusFrame::UnknownFrame);
-        frame.setFlexibleDataRateFormat(false);
-        frame.setBitrateSwitch(false);
+    QCanBusFrame frame;
+    frame.setExtendedFrameFormat(true);
+    frame.setFrameType(QCanBusFrame::DataFrame);
+    frame.setFlexibleDataRateFormat(false);
+    frame.setBitrateSwitch(false);
 
-        // Remove start byte and length
-        if (data[0] == char(2)) {
-            data.remove(0, 2);
-        } else if (data[0] == char(3)) {
+    // Remove start byte and length
+    if (data[0] == char(2)) {
+        data.remove(0, 2);
+    } else if (data[0] == char(3)) {
             data.remove(0, 3);
         } else if (data[0] == char(4)) {
             data.remove(0, 4);
@@ -3372,7 +3398,9 @@ void VescInterface::packetDataToSend(QByteArray &data)
             frame.setPayload(data);
 
             mCanDevice->writeFrame(frame);
-            mCanDevice->waitForFramesWritten(5);
+            if (mCanBusWaitForWrite && isCANbusConnected()) {
+                mCanDevice->waitForFramesWritten(5);
+            }
         } else {
             int len = data.size();
             QByteArray payload;
@@ -3397,7 +3425,9 @@ void VescInterface::packetDataToSend(QByteArray &data)
                                  uint32_t(CAN_PACKET_FILL_RX_BUFFER << 8));
 
                 mCanDevice->writeFrame(frame);
-                mCanDevice->waitForFramesWritten(5);
+                if (mCanBusWaitForWrite && isCANbusConnected()) {
+                    mCanDevice->waitForFramesWritten(5);
+                }
 //                QThread::msleep(5);
                 payload.clear();
             }
@@ -3413,7 +3443,9 @@ void VescInterface::packetDataToSend(QByteArray &data)
                                  uint32_t(CAN_PACKET_FILL_RX_BUFFER_LONG << 8));
 
                 mCanDevice->writeFrame(frame);
-                mCanDevice->waitForFramesWritten(5);
+                if (mCanBusWaitForWrite && isCANbusConnected()) {
+                    mCanDevice->waitForFramesWritten(5);
+                }
 //                QThread::msleep(5);
                 payload.clear();
             }
@@ -3429,7 +3461,9 @@ void VescInterface::packetDataToSend(QByteArray &data)
                              uint32_t(CAN_PACKET_PROCESS_RX_BUFFER << 8));
 
             mCanDevice->writeFrame(frame);
-            mCanDevice->waitForFramesWritten(5);
+            if (mCanBusWaitForWrite && isCANbusConnected()) {
+                mCanDevice->waitForFramesWritten(5);
+            }
         }
     }
 #endif

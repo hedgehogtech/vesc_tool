@@ -24,6 +24,7 @@
 #include <QMessageBox>
 #include <QListWidgetItem>
 #include <QInputDialog>
+#include <QVariantMap>
 
 PageConnection::PageConnection(QWidget *parent) :
     QWidget(parent),
@@ -155,7 +156,8 @@ void PageConnection::setVesc(VescInterface *vesc)
 #endif
 
 #ifdef HAS_CANBUS
-    ui->CANbusBitrateBox->setValue(mVesc->getLastCANbusBitrate());
+    ui->CANbusBitrateBox->setValue(500000);
+    ui->CANbusInterfaceBox->setEditable(true);
 
     ui->CANbusInterfaceBox->clear();
     QList<QString> interfaces = mVesc->listCANbusInterfaces();
@@ -164,7 +166,18 @@ void PageConnection::setVesc(VescInterface *vesc)
         ui->CANbusInterfaceBox->addItem(interfaces.at(i), interfaces.at(i));
     }
 
-    ui->CANbusInterfaceBox->setCurrentIndex(0);
+    if (ui->CANbusInterfaceBox->count() > 0) {
+        ui->CANbusInterfaceBox->setCurrentIndex(0);
+    } else {
+#ifdef Q_OS_WIN
+        ui->CANbusInterfaceBox->addItem("PCAN_USBBUS1", "PCAN_USBBUS1");
+        ui->CANbusInterfaceBox->setCurrentIndex(0);
+#endif
+    }
+
+    if (ui->CANbusTargetIdBox->count() == 0) {
+        ui->CANbusTargetIdBox->addItem(QString::number(1), QString::number(1));
+    }
 #endif
 
     connect(mVesc->commands(), SIGNAL(pingCanRx(QVector<int>,bool)),
@@ -329,6 +342,12 @@ void PageConnection::CANbusInterfaceListUpdated()
         ui->CANbusInterfaceBox->addItem(interfaces.at(i), interfaces.at(i));
     }
 
+    if (ui->CANbusInterfaceBox->count() == 0) {
+#ifdef Q_OS_WIN
+        ui->CANbusInterfaceBox->addItem("PCAN_USBBUS1", "PCAN_USBBUS1");
+#endif
+    }
+
     ui->CANbusInterfaceBox->setCurrentIndex(0);
 }
 
@@ -381,11 +400,27 @@ void PageConnection::on_CANbusScanButton_clicked()
 {
     if (mVesc) {
         ui->CANbusScanButton->setEnabled(false);
-        mVesc->connectCANbus("socketcan", ui->CANbusInterfaceBox->currentData().toString(),
-                             ui->CANbusBitrateBox->value());
+        QVariantMap data = ui->CANbusInterfaceBox->currentData().toMap();
+        QString backend = data.value("backend").toString();
+        QString iface = data.value("interface").toString();
+
+        if (backend.isEmpty()) {
+#ifdef Q_OS_WIN
+            backend = "peakcan";
+            iface = ui->CANbusInterfaceBox->currentText();
+#else
+            backend = "socketcan";
+            iface = ui->CANbusInterfaceBox->currentText();
+#endif
+        }
+
+        mVesc->connectCANbus(backend, iface, ui->CANbusBitrateBox->value());
 
         ui->CANbusTargetIdBox->clear();
         mVesc->scanCANbus();
+        if (ui->CANbusTargetIdBox->count() == 0) {
+            ui->CANbusTargetIdBox->addItem(QString::number(1), QString::number(1));
+        }
         ui->CANbusScanButton->setEnabled(true);
     }
 }
@@ -400,9 +435,29 @@ void PageConnection::on_CANbusDisconnectButton_clicked()
 void PageConnection::on_CANbusConnectButton_clicked()
 {
     if (mVesc) {
-        mVesc->setCANbusReceiverID(ui->CANbusTargetIdBox->currentData().toInt());
-        mVesc->connectCANbus("socketcan", ui->CANbusInterfaceBox->currentData().toString(),
-                             ui->CANbusBitrateBox->value());
+        int targetId = ui->CANbusTargetIdBox->currentData().toInt();
+        if (targetId == 0) {
+            targetId = ui->CANbusTargetIdBox->currentText().toInt();
+        }
+        if (targetId <= 0) {
+            targetId = 1;
+        }
+        mVesc->setCANbusReceiverID(targetId);
+        QVariantMap data = ui->CANbusInterfaceBox->currentData().toMap();
+        QString backend = data.value("backend").toString();
+        QString iface = data.value("interface").toString();
+
+        if (backend.isEmpty()) {
+#ifdef Q_OS_WIN
+            backend = "peakcan";
+            iface = ui->CANbusInterfaceBox->currentText();
+#else
+            backend = "socketcan";
+            iface = ui->CANbusInterfaceBox->currentText();
+#endif
+        }
+
+        mVesc->connectCANbus(backend, iface, ui->CANbusBitrateBox->value());
     }
 }
 

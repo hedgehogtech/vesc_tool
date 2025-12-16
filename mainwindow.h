@@ -170,9 +170,18 @@ private:
     QTimer *mDebugTimer;
     QTimer *mTimer;
     QLabel *mStatusLabel;
+    QLabel *mLimitLabel;
     int mStatusInfoTime;
     bool mKeyLeft;
     bool mKeyRight;
+    enum ControlMode {
+        ControlNone = 0,
+        ControlDuty,
+        ControlCurrent,
+        ControlRpm
+    };
+    ControlMode mControlMode;
+    double mControlValue;
     bool mMcConfRead;
     bool mAppConfRead;
     QMap<QString, int> mPageNameIdList;
@@ -186,6 +195,7 @@ private:
     QTimer mPollBmsTimer;
     QTimer mPortTimer;
     QTimer mSettingSyncTimer;
+    QTimer mControlTimer;
 
     PageWelcome *mPageWelcome;
     PageConnection *mPageConnection;
@@ -242,6 +252,8 @@ private:
     bool waitProcess(QProcess &process, bool block = true, int timeoutMs = 300000);
     QString runCmd(QString cmd, QStringList args);
 #endif
+    void sendControlCommand();
+    void updateLimitStatus(const MC_VALUES &values);
 };
 
 #endif // MAINWINDOW_H

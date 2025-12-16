@@ -220,15 +220,23 @@ MainWindow::MainWindow(QWidget *parent) :
     mStatusInfoTime = 0;
     mStatusLabel = new QLabel(this);
     ui->statusBar->addPermanentWidget(mStatusLabel);
+    mLimitLabel = new QLabel(this);
+    mLimitLabel->setMinimumWidth(250);
+    ui->statusBar->addWidget(mLimitLabel);
     mDebugTimer = new QTimer(this);
     mTimer = new QTimer(this);
     mKeyLeft = false;
     mKeyRight = false;
+    mControlMode = ControlNone;
+    mControlValue = 0.0;
+    mControlTimer.setInterval(5);
+    mControlTimer.setTimerType(Qt::PreciseTimer);
 
     connect(mDebugTimer, SIGNAL(timeout()),
             this, SLOT(timerSlotDebugMsg()));
     connect(mTimer, SIGNAL(timeout()),
             this, SLOT(timerSlot()));
+    connect(&mControlTimer, &QTimer::timeout, this, &MainWindow::sendControlCommand);
     connect(mVesc, SIGNAL(statusMessage(QString,bool)),
             this, SLOT(showStatusInfo(QString,bool)));
     connect(mVesc, SIGNAL(messageDialog(QString,QString,bool,bool)),
@@ -475,6 +483,11 @@ MainWindow::MainWindow(QWidget *parent) :
     mDebugTimer->start(10);
     mTimer->start(20);
 
+    mPollRtTimer.setTimerType(Qt::PreciseTimer);
+    mPollAppTimer.setTimerType(Qt::PreciseTimer);
+    mPollImuTimer.setTimerType(Qt::PreciseTimer);
+    mPollBmsTimer.setTimerType(Qt::PreciseTimer);
+
     mPollRtTimer.start(int(1000.0 / mSettings.value("poll_rate_rt_data", 50).toDouble()));
     mPollAppTimer.start(int(1000.0 / mSettings.value("poll_rate_app_data", 50).toDouble()));
     mPollImuTimer.start(int(1000.0 / mSettings.value("poll_rate_imu_data", 50).toDouble()));
@@ -482,10 +495,23 @@ MainWindow::MainWindow(QWidget *parent) :
 
     connect(&mPollRtTimer, &QTimer::timeout, [this]() {
         if (ui->actionRtData->isChecked()) {
-            mVesc->commands()->getStats(0xFFFFFFFF);
-            mVesc->commands()->getValues();
-            mVesc->commands()->getValuesSetup();
-            mPollRtTimer.setInterval(int(1000.0 / mSettings.value("poll_rate_rt_data", 50).toDouble()));
+            bool controlling = (mControlMode != ControlNone);
+            if (controlling) {
+                // Trim RT traffic while streaming control to keep the motor steady.
+                mVesc->commands()->getValues();
+            } else {
+                mVesc->commands()->getStats(0xFFFFFFFF);
+                mVesc->commands()->getValues();
+                mVesc->commands()->getValuesSetup();
+            }
+            int pollRate = mSettings.value("poll_rate_rt_data", 50).toInt();
+            if (controlling) {
+                // Keep RT updates reasonably quick while streaming control.
+                pollRate = qMin(pollRate, 20);
+                pollRate = qMax(pollRate, 10);
+            }
+            pollRate = qMax(pollRate, 1);
+            mPollRtTimer.setInterval(int(1000.0 / double(pollRate)));
         }
     });
 
@@ -1033,6 +1059,7 @@ void MainWindow::valuesReceived(MC_VALUES values, unsigned int mask)
     (void)mask;
     ui->dispCurrent->setVal(values.current_motor);
     ui->dispDuty->setVal(values.duty_now * 100.0);
+    updateLimitStatus(values);
 }
 
 void MainWindow::paramChangedDouble(QObject *src, QString name, double newParam)
@@ -1062,7 +1089,120 @@ void MainWindow::on_actionReconnect_triggered()
 
 void MainWindow::on_actionDisconnect_triggered()
 {
+    mControlMode = ControlNone;
+    mControlTimer.stop();
     mVesc->disconnectPort();
+}
+
+void MainWindow::sendControlCommand()
+{
+    if (!mVesc->isPortConnected()) {
+        mControlMode = ControlNone;
+        mControlTimer.stop();
+        return;
+    }
+
+    if (!ui->actionSendAlive->isChecked()) {
+        ui->actionSendAlive->setChecked(true);
+    }
+
+    switch (mControlMode) {
+    case ControlDuty:
+        mVesc->commands()->setDutyCycle(mControlValue);
+        break;
+    case ControlCurrent:
+        mVesc->commands()->setCurrent(mControlValue);
+        break;
+    case ControlRpm:
+        mVesc->commands()->setRpm(int(mControlValue));
+        break;
+    case ControlNone:
+    default:
+        mControlTimer.stop();
+        break;
+    }
+}
+
+void MainWindow::updateLimitStatus(const MC_VALUES &values)
+{
+    if (!mLimitLabel) {
+        return;
+    }
+
+    auto *mc = mVesc->mcConfig();
+    auto hasParam = [mc](const char *name) {
+        return mc->hasParam(name);
+    };
+    auto getParam = [mc](const char *name) {
+        return mc->getParamDouble(name);
+    };
+
+    QStringList active;
+
+    // FET temperature
+    if (hasParam("l_temp_fet_start")) {
+        double start = getParam("l_temp_fet_start");
+        if (values.temp_mos >= start && start > 0.0) {
+            active << QString("FET temp %.1f\u00b0C").arg(values.temp_mos);
+        }
+    }
+
+    // Duty cycle
+    if (hasParam("l_max_duty")) {
+        double maxDuty = getParam("l_max_duty");
+        if (std::fabs(values.duty_now) >= maxDuty * 0.97 && maxDuty > 0.0) {
+            active << QString("Duty %.1f%%").arg(values.duty_now * 100.0);
+        }
+    }
+
+    // Speed limits (ERPM)
+    if (hasParam("l_max_erpm")) {
+        double maxErpm = getParam("l_max_erpm");
+        if (values.rpm >= maxErpm * 0.98 && maxErpm > 0.0) {
+            active << QString("Max ERPM %.0f").arg(values.rpm);
+        }
+    }
+    if (hasParam("l_min_erpm")) {
+        double minErpm = getParam("l_min_erpm");
+        if (minErpm < 0.0 && values.rpm <= minErpm * 0.98) {
+            active << QString("Min ERPM %.0f").arg(values.rpm);
+        }
+    }
+
+    // Battery voltage cutoff
+    if (hasParam("l_battery_cut_start")) {
+        double vStart = getParam("l_battery_cut_start");
+        if (vStart > 0.0 && values.v_in <= vStart + 0.05) {
+            active << QString("Battery %.2f V").arg(values.v_in);
+        }
+    }
+
+    // Input current limits
+    if (hasParam("l_in_current_max")) {
+        double inMax = getParam("l_in_current_max");
+        if (inMax > 0.0 && values.current_in >= inMax * 0.98) {
+            active << QString("Input current %.1f A").arg(values.current_in);
+        }
+    }
+    if (hasParam("l_in_current_min")) {
+        double inMin = getParam("l_in_current_min");
+        if (inMin < 0.0 && values.current_in <= inMin * 0.98) {
+            active << QString("Regen current %.1f A").arg(values.current_in);
+        }
+    }
+
+    QString text;
+    if (active.isEmpty()) {
+        text = "Limits: none";
+        mLimitLabel->setStyleSheet("");
+    } else {
+        text = "Limits: " + active.join(", ");
+        mLimitLabel->setStyleSheet("color: #f28c28;");
+    }
+
+    if (text != mLimitLabel->text()) {
+        mLimitLabel->setText(text);
+    }
 }
 
 void MainWindow::on_actionReboot_triggered()
@@ -1077,6 +1217,8 @@ void MainWindow::on_actionShutdown_triggered()
 
 void MainWindow::on_stopButton_clicked()
 {
+    mControlMode = ControlNone;
+    mControlTimer.stop();
     mVesc->commands()->setCurrent(0);
     int estopMs = mSettings.value("estop_ms", 5000).toInt();
     if (estopMs > 0) {
@@ -1088,6 +1230,8 @@ void MainWindow::on_stopButton_clicked()
 
 void MainWindow::on_fullBrakeButton_clicked()
 {
+    mControlMode = ControlNone;
+    mControlTimer.stop();
     mVesc->commands()->setDutyCycle(0);
     ui->actionSendAlive->setChecked(true);
 }
@@ -1269,36 +1413,51 @@ void MainWindow::on_actionLibrariesUsed_triggered()
 
 void MainWindow::on_dutyButton_clicked()
 {
+    mControlMode = ControlDuty;
+    mControlValue = ui->dutyBox->value();
+    mControlTimer.start();
     mVesc->commands()->setDutyCycle(ui->dutyBox->value());
     ui->actionSendAlive->setChecked(true);
 }
 
 void MainWindow::on_currentButton_clicked()
 {
+    mControlMode = ControlCurrent;
+    mControlValue = ui->currentBox->value();
+    mControlTimer.start();
     mVesc->commands()->setCurrent(ui->currentBox->value());
     ui->actionSendAlive->setChecked(true);
 }
 
 void MainWindow::on_speedButton_clicked()
 {
+    mControlMode = ControlRpm;
+    mControlValue = ui->speedBox->value();
+    mControlTimer.start();
     mVesc->commands()->setRpm(int(ui->speedBox->value()));
     ui->actionSendAlive->setChecked(true);
 }
 
 void MainWindow::on_posButton_clicked()
 {
+    mControlMode = ControlNone;
+    mControlTimer.stop();
     mVesc->commands()->setPos(ui->posBox->value());
     ui->actionSendAlive->setChecked(true);
 }
 
 void MainWindow::on_brakeCurrentButton_clicked()
 {
+    mControlMode = ControlNone;
+    mControlTimer.stop();
     mVesc->commands()->setCurrentBrake(ui->brakeCurrentBox->value());
     ui->actionSendAlive->setChecked(true);
 }
 
 void MainWindow::on_handbrakeButton_clicked()
 {
+    mControlMode = ControlNone;
+    mControlTimer.stop();
     mVesc->commands()->setHandbrake(ui->handbrakeBox->value());
     ui->actionSendAlive->setChecked(true);
 }
